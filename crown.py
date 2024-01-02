@@ -11,6 +11,9 @@ from contextlib import ExitStack
 from linear import BoundLinear
 from relu import BoundReLU
 
+# Gurobi imports to check with a linear program solver
+from gurobipy import GRB, quicksum
+
 
 class BoundSequential(nn.Sequential):
     def __init__(self, *args):
@@ -159,6 +162,126 @@ class BoundSequential(nn.Sequential):
             ub = x_U.new([np.inf])
         if lb is None:
             lb = x_L.new([-np.inf])
+        return ub, lb
+    
+    def compute_bounds_with_constraints(self, x_inputs, gurobi_opt, optimize=False):
+        r"""Main function for computing bounds given a Gurobi model with already placed constraints.
+
+        Args:
+        Args:
+            x_U (tensor): The upper bound of x.
+
+            x_L (tensor): The lower bound of x.
+
+            upper (bool): Whether we want upper bound.
+
+            lower (bool): Whether we want lower bound.
+
+            optimize (bool): Whether we optimize alpha.
+
+        Returns:
+            ub (tensor): The upper bound of the final output.
+
+            lb (tensor): The lower bound of the final output.    
+        """
+        ub = lb = None
+        # if optimize:
+        #     # alpha-CROWN
+        #     if upper:
+        #         ub, _ = self._get_optimized_bounds(x_L=x_L, x_U=x_U, upper=True, lower=False)
+        #     if lower:
+        #         _, lb = self._get_optimized_bounds(x_L=x_L, x_U=x_U, upper=False, lower=True)
+        # else:
+        # CROWN
+        ub, lb = self.full_backward_range_with_constraints(x_inputs, gurobi_opt)
+        return ub, lb
+    
+    def full_backward_range_with_constraints(self, x_inputs, gurobi_opt, optimize=False):
+        r"""A full backward propagation. We are going to sequentially compute the 
+        intermediate bounds for each linear layer followed by a ReLU layer. For each
+        intermediate bound, we call self.backward_range() to do a backward propagation 
+        starting from that layer.
+
+        Args:
+            x_U (tensor): The upper bound of x.
+
+            x_L (tensor): The lower bound of x.
+
+            upper (bool): Whether we want upper bound.
+
+            lower (bool): Whether we want lower bound.
+
+            optimize (bool): Whether we optimize alpha.
+
+        Returns:
+            ub (tensor): The upper bound of the final output.
+
+            lb (tensor): The lower bound of the final output.    
+        """
+        modules = list(self._modules.values())
+        # CROWN propagation for all layers
+        for i in range(len(modules)):
+            # We only need the bounds before a ReLU layer
+            if isinstance(modules[i], BoundReLU):
+                if isinstance(modules[i-1], BoundLinear):
+                    # add a batch dimension
+                    newC = torch.eye(modules[i-1].out_features).unsqueeze(0).repeat(x_inputs.shape[0], 1, 1) #.to(x_U)
+                    # Use CROWN to compute pre-activation bounds
+                    # starting from layer i-1
+                    ub, lb = self.backward_range_with_constraints(x_inputs, gurobi_opt, C=newC, start_node=i-1, optimize=optimize)
+                # Set pre-activation bounds for layer i (the ReLU layer)
+                modules[i].upper_u = ub
+                modules[i].lower_l = lb
+        # Get the final layer bound
+        return self.backward_range_with_constraints(x_inputs, gurobi_opt, C=torch.eye(modules[i].out_features).unsqueeze(0), start_node=i, optimize=optimize)
+
+    def backward_range_with_constraints(self, x_inputs, gurobi_opt, C=None, upper=True, lower=True, start_node=None, optimize=False):
+        r"""The backward propagation starting from a given node. Can be used to compute intermediate bounds or the final bound.
+
+        Args:
+            x_U (tensor): The upper bound of x.
+
+            x_L (tensor): The lower bound of x.
+
+            C (tensor): The initial coefficient matrix. Can be used to represent the output constraints.
+            But we don't have any constraints here. So it's just an identity matrix.
+
+            upper (bool): Whether we want upper bound.
+
+            lower (bool): Whether we want lower bound. 
+
+            start_node (int): The start node of this propagation. It should be a linear layer.
+
+            optimize (bool): Whether we optimize parameters.
+
+        Returns:
+            ub (tensor): The upper bound of the output of start_node.
+            lb (tensor): The lower bound of the output of start_node.
+        """
+        # start propagation from the last layer
+        modules = list(self._modules.values()) if start_node is None else list(self._modules.values())[:start_node+1]
+        upper_A = C if upper else None
+        lower_A = C if lower else None
+        upper_sum_b = lower_sum_b = torch.tensor([0.0])# x_U.new([0])
+        for i, module in enumerate(reversed(modules)):
+            upper_A, upper_b, lower_A, lower_b = module.bound_backward(upper_A, lower_A, start_node, optimize)
+            upper_sum_b = upper_b + upper_sum_b
+            lower_sum_b = lower_b + lower_sum_b
+        # sign = +1: upper bound, sign = -1: lower bound
+        def _get_concrete_bound(A, sum_b, upper_bound):
+            if A is None:
+                return None
+            
+
+
+            bound = bound.squeeze(-1) + sum_b
+            return bound
+        lb = _get_concrete_bound(lower_A, lower_sum_b, sign=-1)
+        ub = _get_concrete_bound(upper_A, upper_sum_b, sign=+1)
+        if ub is None:
+            ub = torch.tensor([np.inf]).float()
+        if lb is None:
+            lb = torch.tensor([-np.inf]).float()
         return ub, lb
     
     def _get_optimized_bounds(self, x_U=None, x_L=None, upper=False, lower=True):
@@ -353,10 +476,10 @@ if __name__ == '__main__':
     output_width = model.model[-1].out_features
 
     torch.manual_seed(14)
-    batch_size = 2
+    batch_size = 1
     x = torch.rand(batch_size, input_width).to(device)
     
-    eps = 1
+    eps = 2
     x_u = x + eps
     x_l = x - eps
 

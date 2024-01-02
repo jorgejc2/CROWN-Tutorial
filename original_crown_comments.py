@@ -168,6 +168,7 @@ class BoundReLU(nn.ReLU):
             neg_uA = last_uA.clamp(max=0) # JC retain shape of last_uA but only keep negative entries
             uA = upper_d * pos_uA + ub_lower_d * neg_uA # JC element wise addition puts positive and negative entries together into new uA
 
+            # JC for ReLU, only upper bounds have 'bias' terms that need to be taken into account
             mult_uA = pos_uA.view(last_uA.size(0), last_uA.size(1), -1)
             ubias = mult_uA.matmul(upper_b.view(upper_b.size(0), -1, 1)).squeeze(-1)
         if last_lA is not None:
@@ -386,10 +387,13 @@ class BoundSequential(nn.Sequential):
         Returns:
             best_ret_u (tensor): Optimized upper bound of the final output.
             best_ret_l (tensor): Optimized lower bound of the final output.
+
+        JC Notice that lower is true and upper is false. This is because upper alpha is typically optimal, thus the main optimization to be done is on the alpha slope for the lower bound of ReLU
         """
         modules = list(self._modules.values())
         self.init_alpha(x_U=x_U, x_L=x_L)
         alphas, parameters = [], []
+        # JC obtains the parameters (includings alphas) to pass to Adam, references to the alphas, and a copy of the previous best alphas
         best_alphas = self._set_alpha(parameters, alphas, lr=1e-1)
         opt = optim.Adam(parameters)
         # Create a weight vector to scale learning rate.
@@ -420,12 +424,13 @@ class BoundSequential(nn.Sequential):
             if ub is not None:
                 u = torch.sum(ub)        
             loss_ = l if lower else -u
-            loss = (-1 * loss_).sum()
+            loss = (-1 * loss_).sum() # JC negative one because we want to maximize a lower bound but minimze an upper bound
             with torch.no_grad():
+                # JC want to find the best lower and upper bound without calculating gradients 
                 best_ret_l = torch.max(best_ret_l, lb)
                 best_ret_u = torch.min(best_ret_u, ub)
                 self._update_optimizable_activations(best_intermediate_bounds, best_alphas)
-            opt.zero_grad(set_to_none=True)
+            opt.zero_grad(set_to_none=True) # JC reset the gradients before we accumulate them using loss.backward()
             if i != iteration - 1:
                 # We do not need to update parameters in the last step since the
                 # best result already obtained
