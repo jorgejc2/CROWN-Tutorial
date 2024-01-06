@@ -147,6 +147,7 @@ class BoundReLU(nn.ReLU):
         upper_d = ub_r / (ub_r - lb_r) # JC same as (u_j)/(U_j-l_j)
         upper_b = - lb_r * upper_d # JC same as -(u_j*l_j)/(u_j - l_j)
         upper_d = upper_d.unsqueeze(1) # JC adding a dimension of 1 at the second position such that upper_d is now a row vector
+        # JC Notice that only d/alpha is being optimzed for the lower bound as we know the optimal coefficient for the upper bound
         if optimize:
             # selected_alpha has shape (2, dim_of_start_node, batch_size=1, dim_of_this_node)
             selected_alpha = self.alpha[start_node]
@@ -426,7 +427,7 @@ class BoundSequential(nn.Sequential):
             loss_ = l if lower else -u
             loss = (-1 * loss_).sum() # JC negative one because we want to maximize a lower bound but minimze an upper bound
             with torch.no_grad():
-                # JC want to find the best lower and upper bound without calculating gradients 
+                # JC want to clip the upper and lower bounds without calculating gradients 
                 best_ret_l = torch.max(best_ret_l, lb)
                 best_ret_u = torch.min(best_ret_u, ub)
                 self._update_optimizable_activations(best_intermediate_bounds, best_alphas)
@@ -440,6 +441,8 @@ class BoundSequential(nn.Sequential):
                 if isinstance(node, BoundReLU):
                     node.clip_alpha()
             scheduler.step()
+
+        # JC gradient descent for alpha for-loop has ended; returning best values
         # Set all variables to their saved best values
         with torch.no_grad():
             for idx, node in enumerate(modules):
@@ -553,6 +556,7 @@ def _save_ret_first_time(bounds, fill_value, best_ret):
     else:
         best_ret.append(None)
     return best_bounds
+
 
 
 if __name__ == '__main__':
