@@ -8,13 +8,10 @@ from auto_LiRPA.perturbations import PerturbationLpNorm
 from collections import OrderedDict
 from contextlib import ExitStack
 
-# JC here you may import any model you wish to verify
-# from model import Model
-# from simple_model import Model
+# additional packages
 from stupid_model import Model
 import matplotlib.pyplot as plt
 from math import ceil
-
 
 class BoundLinear(nn.Linear):
     def __init(self, in_features, out_features, bias=True):
@@ -95,7 +92,6 @@ class BoundLinear(nn.Linear):
         lower = center - deviation
         return upper, lower
     
-
 class BoundReLU(nn.ReLU):
     def __init__(self, inplace=False):
         super(BoundReLU, self).__init__(inplace)
@@ -218,7 +214,6 @@ class BoundReLU(nn.ReLU):
         for v in self.alpha.values():
             v.data = torch.clamp(v.data, 0, 1)
 
-
 class BoundSequential(nn.Sequential):
     def __init__(self, *args):
         super(BoundSequential, self).__init__(*args)
@@ -315,12 +310,6 @@ class BoundSequential(nn.Sequential):
                     # Use CROWN to compute pre-activation bounds
                     # starting from layer i-1
                     ub, lb = self.backward_range(x_U=x_U, x_L=x_L, C=newC, upper=True, lower=True, start_node=i-1, optimize=optimize)
-
-                    # JC try updating bounds in each layer
-                    # if use_input_constraints:
-                    #     ub, lb = self.backward_range(x_U=x_U, x_L=x_L, C=newC, upper=True, lower=True, start_node=i-1, optimize=optimize, lambda_=lambda_, G=G, h=h, use_input_constraints=use_input_constraints)
-                    # else:
-                    #     ub, lb = self.backward_range(x_U=x_U, x_L=x_L, C=newC, upper=True, lower=True, start_node=i-1, optimize=optimize)
                 # Set pre-activation bounds for layer i (the ReLU layer) 
                 # JC the bounds of the ReLu layer will be the bounds of the output before the activation (ReLu) function
                 modules[i].upper_u = ub
@@ -389,25 +378,8 @@ class BoundSequential(nn.Sequential):
 
             if use_input_constraints:
                 extrema = torch.abs(x_lb) if sign == -1 else torch.abs(x_ub)
-
-                # attempt 5 (using the actual minima and maxima)
                 bound = sign * torch.abs((A.squeeze(0).T - G.T@lambda_).T)@extrema - sign * h.T@lambda_
                 bound = bound.squeeze(-1) + sum_b
-
-                # attempt 4 (should look similar to attempt 2)
-                # bound = A.squeeze(0)@center + sign * A.squeeze(0).abs()@diff + lambda_.T@h - lambda_.T@G@center + sign * (lambda_.T@G).abs()@diff
-                # bound = bound.squeeze(-1) + sum_b
-                # attempt 3
-                # bound = (A.squeeze(0) - G.T@lambda_).T@(center.squeeze(0)) + sign*(A.squeeze(0) - G.T@lambda_).abs().T@(diff.squeeze(0)) - sign * lambda_.T@h
-                # bound = bound.squeeze(-1) + sum_b
-                # print(f"Bound has shape {bound.shape}; A.shape {A.shape}; sum_b.shape {sum_b.shape}, center {center.shape}, x_lb {diff.shape}")
-                # attempt 2
-                # bound = A.bmm(center) + sign * A.abs().bmm(diff) + lambda_.T@h - lambda_.T@G@center + sign * (lambda_.T@G).abs()@diff
-                # bound = bound.squeeze(-1) + sum_b 
-
-                # attempt 1
-                # bound = (A + lambda_.T@G).bmm(center).abs() + sign * (A + lambda_.T@G).abs().bmm(diff)
-                # bound = bound.squeeze(-1) + sum_b + sign * lambda_.T@h
 
             else:
                 # JC return the dual bound without dealing with Lagrange multipliers
@@ -551,103 +523,6 @@ class BoundSequential(nn.Sequential):
                     node.upper_u.data = best_intermediate[1].data
         
         if (use_input_constraints):
-            
-            # # now perform gradient descent again but for lambdas
-            # # JC must extend the parameters to include lambdas if there are input constraints
-            # assert self.has_input_constraints, "No input constraints were given"
-            # assert self.G is not None, "G not given"
-            # assert self.h is not None, "h not given"
-            # lambda_rows = self.G.shape[0]
-            # lambda_ = torch.rand(lambda_rows, 2, requires_grad=True)
-            # iteration = 200
-            # loss_graph = np.array([i for i in range(iteration)], dtype=np.float32)
-            # loss_graph = np.vstack((loss_graph, np.zeros(iteration)))
-            # lambda_vals = np.array([i for i in range(iteration)], dtype=np.float32)
-            # lambda_vals = np.tile(lambda_vals, lambda_.shape[0] + 1).reshape(-1, iteration) 
-
-            # modules = list(self._modules.values())
-            # n = len(modules) - 1
-            
-            # opt = optim.Adam([lambda_], lr=0.1, maximize=True if lower else False)
-            # # Create a weight vector to scale learning rate.
-            # # scheduler = optim.lr_scheduler.ExponentialLR(opt, 0.98)
-
-            # x_L_np = x_L.numpy().flatten()
-            # x_U_np = x_U.numpy().flatten()
-            # if lower:
-            #     print(f"x_L_np {x_L_np}")
-            # else:
-            #     print(f"x_U_np {x_U_np}")
-            # if lower:
-            #     a = np.array([[x_L_np[0], x_L_np[1], 0, 0],[0, 0, x_L_np[0], x_L_np[1]]])
-            #     b = np.array([[-1.5552],[-1.2606]])
-            # else:
-            #     a = np.array([[x_U_np[0], x_U_np[1], 0, 0],[0, 0, x_U_np[0], x_U_np[1]]])
-            #     b = np.array([[-0.0812],[1.7438]])
-            
-            # result = np.linalg.lstsq(a,b, rcond=None)
-            # A_matrix = np.float32(result[0])
-            # print(f"A_matrix {A_matrix.reshape(2,2)}, isclose {np.isclose(a@A_matrix, b)}")
-            # A_matrix = torch.from_numpy(A_matrix).reshape(2,2)
-
-            # x_ub = x_U.view(x_U.size(0), -1, 1)
-            # x_lb = x_L.view(x_L.size(0), -1, 1)
-            # center = (x_ub + x_lb) / 2.0
-            # diff = (x_ub - x_lb) / 2.0
-            # sign = -1 if lower else 1
-
-            # if lower:
-            #     print(f"Before adding constraints, best_lb = {best_ret_l}")
-            # else:
-            #     print(f"Before adding constraints, best_ub = {best_ret_u}")
-
-            # for i in range(iteration):
-            #     curr_ub, curr_lb = self.backward_range(x_U=x_U, x_L=x_L, C=torch.eye(modules[n].out_features).unsqueeze(0), upper=upper, lower=lower, start_node=n, optimize=True, lambda_=lambda_, G=G, h=h, use_input_constraints=True)
-            #     # curr_ub, curr_lb = self.full_backward_range(x_U=x_U, x_L=x_L, upper=upper, lower=lower, optimize=True, lambda_=lambda_, G=self.G, h=self.h, use_input_constraints=use_input_constraints)
-            #     # y = (A_matrix - G.T@lambda_).T@(center.squeeze(0)) + sign*(A_matrix - G.T@lambda_).abs().T@(diff.squeeze(0)) - sign * lambda_.T@h
-
-            #     with torch.no_grad():
-            #         best_ret_l = torch.max(best_ret_l, curr_lb)
-            #         best_ret_u = torch.min(best_ret_u, curr_ub)
-
-            #     # with torch.no_grad():
-            #     #     best_ret_l = torch.max(best_ret_l, y)
-            #     #     best_ret_u = torch.min(best_ret_u, y)
-
-            #     if lower:
-            #         y = curr_lb.sum()
-            #         # y = curr_lb.squeeze()[0]
-            #     else:
-            #         y = curr_ub.sum()
-            #         # y = curr_ub.squeeze()[0]
-            #     # y = y.sum()
-
-            #     opt.zero_grad(set_to_none=True)
-            #     y.backward()
-            #     opt.step()
-            #     # scheduler.step()
-
-            #     with torch.no_grad():
-            #         lambda_.data = torch.clip(lambda_.data, min=0.0)
-            #         lambda_vals[1:, i] = lambda_.data[:,0].detach().clone().numpy().flatten()
-            #         loss_graph[1, i] = y.item()
-
-            # without gradient descent
-            # curr_ub, curr_lb = self.backward_range(x_U=x_U, x_L=x_L, C=torch.eye(modules[n].out_features).unsqueeze(0), upper=upper, lower=lower, start_node=n, optimize=True, lambda_=lambda_, G=G, h=h, use_input_constraints=True)
-            # best_ret_l = torch.max(curr_lb, curr_lb)
-            # best_ret_u = torch.min(curr_ub, curr_ub)
-            # if lower:
-            #     best_ret_l = (A_matrix - G.T@lambda_).T@(center.squeeze(0)) + sign*(A_matrix - G.T@lambda_).abs().T@(diff.squeeze(0)) - sign * lambda_.T@h
-            #     best_ret_l.squeeze(-1)
-            #     best_ret_u = float('inf')
-            #     print(f"a crown with input best_ret_l {best_ret_l}")
-            # else:
-            #     best_ret_l = float('-inf')
-            #     best_ret_u = (A_matrix - G.T@lambda_).T@(center.squeeze(0)) + sign*(A_matrix - G.T@lambda_).abs().T@(diff.squeeze(0)) - sign * lambda_.T@h
-            #     best_ret_u.squeeze(-1)
-            #     print(f"a crown with input best_ret_u {best_ret_u}")
-
-            # display losses 
             fig = plt.figure(figsize=(18,12))
             num_subs = 1 + lambda_.shape[0]
             num_rows = ceil(num_subs / 2)
@@ -667,14 +542,6 @@ class BoundSequential(nn.Sequential):
 
             plt.show()
             print(f"Lambda values: {lambda_.data}")
-        elif (not use_input_constraints):
-            modules = list(self._modules.values())
-            i = len(modules) - 1
-            test_ub, test_lb = self.backward_range(x_U=x_U, x_L=x_L, C=torch.eye(modules[i].out_features).unsqueeze(0), upper=upper, lower=lower, start_node=i, optimize=True)
-            if lower:
-                print(f"Lower Alpha Crown without Input Constraints | lb: {test_lb}")
-            else:
-                print(f"Upper Alpha Crown without Input Constraints | ub: {test_ub}")
 
         return best_ret_u, best_ret_l
     

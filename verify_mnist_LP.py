@@ -95,6 +95,7 @@ class MNISTModelVerifier:
         # JC if manually adding the bounds on the input
         # if not with_input_constraints:
         activations = m.addMVar(shape=(n_in), name='x', lb=lb, ub=ub)
+        og_activations = activations
         # else:
         #     activations = m.addMVar(shape=(n_in), name='x', lb=np.array([-2.0, -5.0]), ub=np.array([4.0, 6.0]))
         pre_activation = None  # We assume the network doesn't start with a ReLU
@@ -104,12 +105,12 @@ class MNISTModelVerifier:
         # x0 = m.getVarByName('x[0]')
         # x1 = m.getVarByName('x[1]')
         # x_in = [x0, x1]
-        ineq_constraints = []
-        if with_input_constraints:
-            G = np.array([[-2/9, 1],[-6/5, 1], [-5/3, -1], [1/8, -1], [5, 1]])
-            h = np.array([[46/9], [6], [25/3], [19/4], [26]])
-            for i in range(G.shape[0]):
-                ineq_constraints.append(m.addConstr(quicksum(G[i,j] * activations[j] for j in range(G.shape[1])) <= h[i], name=f'input_constr_{i}'))
+        # ineq_constraints = []
+        # if with_input_constraints:
+        #     G = np.array([[-2/9, 1],[-6/5, 1], [-5/3, -1], [1/8, -1], [5, 1]])
+        #     h = np.array([[46/9], [6], [25/3], [19/4], [26]])
+        #     for i in range(G.shape[0]):
+        #         ineq_constraints.append(m.addConstr(quicksum(G[i,j] * activations[j] for j in range(G.shape[1])) <= h[i], name=f'input_constr_{i}'))
 
         # JC get the modules per layer
         for i, module in enumerate(self.net.model.children()):
@@ -189,7 +190,12 @@ class MNISTModelVerifier:
         # m.addConstr(max_incorrect_logit == max_([var for i, var in enumerate(output_neurons) if i != label]),
         #             name="max_incorrect_logit")
         # m.setObjective(output_neurons[label] - max_incorrect_logit, GRB.MINIMIZE)
-        
+        ineq_constraints = []
+        if with_input_constraints:
+            G = np.array([[-2/9, 1],[-6/5, 1], [-5/3, -1], [1/8, -1], [5, 1]])
+            h = np.array([[46/9], [6], [25/3], [19/4], [26]])
+            for i in range(G.shape[0]):
+                ineq_constraints.append(m.addConstr(quicksum(G[i,j] * og_activations[j] for j in range(G.shape[1])) <= h[i], name=f'input_constr_{i}'))
         
         # JC this now find the bounds on each logit
         lb = torch.zeros((1, len(output_neurons)), dtype=torch.float32)
@@ -274,7 +280,7 @@ if __name__ == "__main__":
     print(x)
 
     input_width = model.model[0].in_features
-    output_width = model.model[-1].out_featuers
+    output_width = model.model[-1].out_features
 
     lb_a, ub_a, ineq_pi_a = verifier.verify_one(x, label=0, epsilon=epsilon, save_solution_filename="LP_solution_to_very_simple_model.txt", with_input_constraints=False)
     lb_b, ub_b, ineq_pi_b = verifier.verify_one(x, label=0, epsilon=epsilon, save_solution_filename="LP_solution_to_very_simple_model.txt", with_input_constraints=True)
