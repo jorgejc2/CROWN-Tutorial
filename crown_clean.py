@@ -9,7 +9,10 @@ from collections import OrderedDict
 from contextlib import ExitStack
 
 # additional packages
-from stupid_model import Model
+import json
+# from simple_model import Model
+# from stupid_model import Model
+from large_model import Model
 import matplotlib.pyplot as plt
 from math import ceil
 
@@ -180,6 +183,13 @@ class BoundReLU(nn.ReLU):
 
             mult_lA = neg_lA.view(last_lA.size(0), last_lA.size(1), -1)
             lbias = mult_lA.matmul(upper_b.view(upper_b.size(0), -1, 1)).squeeze(-1) # JC as before, will get row vector (which is correct), but just save as a column vector
+
+        def _add_input_constraints(sign, lambda_, G, h, x_L, x_U):
+            x_ub = x_U.view(x_U.size(0), -1, 1)
+            x_lb = x_L.view(x_L.size(0), -1, 1)
+            center = (x_ub + x_lb) / 2.0
+            diff = (x_ub - x_lb) / 2.0
+            const_term = sign * torch.abs(())
         return uA, ubias, lA, lbias
     
     def interval_propagate(self, h_U, h_L):
@@ -241,10 +251,9 @@ class BoundSequential(nn.Sequential):
                 layers.append(BoundReLU.convert(l))
         return BoundSequential(*layers) # JC using star because BoundSequential is a child of nn.Sequential which receives *args or a tuple of layers, in essence, unpacking [layers] as multiple arguments
     
-    def compute_bounds(self, x_U=None, x_L=None, upper=True, lower=True, optimize=False, use_input_constraints=False):
+    def compute_bounds(self, x_U=None, x_L=None, upper=True, lower=True, optimize=False, input_constraints=[]):
         r"""Main function for computing bounds.
 
-        Args:
         Args:
             x_U (tensor): The upper bound of x.
 
@@ -261,20 +270,28 @@ class BoundSequential(nn.Sequential):
 
             lb (tensor): The lower bound of the final output.    
         """
+        # check that input constraints is in a valid format
+        if (len(input_constraints) > 0):
+            assert len(input_constraints) == 2, "Please give the G matrix and h vector as input constraints"
+            G = input_constraints[0]
+            h = input_constraints[1]
+            assert len(G.shape) == 2, "Please make sure G is a 2 dimension matrix"
+            assert G.shape[0] == h.shape[0], "Please make sure G and h hold an equal number of constraints"
+
         ub = lb = None
         if optimize:
             # alpha-CROWN
             if upper:
-                ub, _ = self._get_optimized_bounds(x_L=x_L, x_U=x_U, upper=True, lower=False, use_input_constraints=use_input_constraints)
+                ub, _ = self._get_optimized_bounds(x_L=x_L, x_U=x_U, upper=True, lower=False, input_constraints=input_constraints)
             if lower:
-                _, lb = self._get_optimized_bounds(x_L=x_L, x_U=x_U, upper=False, lower=True, use_input_constraints=use_input_constraints)
+                _, lb = self._get_optimized_bounds(x_L=x_L, x_U=x_U, upper=False, lower=True, input_constraints=input_constraints)
         else:
             # CROWN
             ub, lb = self.full_backward_range(x_U=x_U, x_L=x_L, upper=upper, lower=lower)
         return ub, lb
     
     # Full CROWN bounds with all intermediate layer bounds computed by CROWN
-    def full_backward_range(self, x_U=None, x_L=None, upper=True, lower=True, optimize=False, lambda_=None, G=None, h=None, use_input_constraints=False):
+    def full_backward_range(self, x_U=None, x_L=None, upper=True, lower=True, optimize=False, lagrange_multipliers=None, G=None, h=None):
         r"""A full backward propagation. We are going to sequentially compute the 
         intermediate bounds for each linear layer followed by a ReLU layer. For each
         intermediate bound, we call self.backward_range() to do a backward propagation 
@@ -296,33 +313,34 @@ class BoundSequential(nn.Sequential):
 
             lb (tensor): The lower bound of the final output.    
         """
+        use_input_constraints = True if (lagrange_multipliers is not None and G is not None and h is not None) else False
+
         modules = list(self._modules.values())
         # CROWN propagation for all layers
         for i in range(len(modules)):
+
             # We only need the bounds before a ReLU layer
             if isinstance(modules[i], BoundReLU):
                 if isinstance(modules[i-1], BoundLinear):
                     # add a batch dimension
-                    newC = torch.eye(modules[i-1].out_features).unsqueeze(0).repeat(x_U.shape[0], 1, 1) # JC take I matrix and make it R^{1 X out_features X out_featuers}, then add depth to it so there are shape[0] copies of the identity matrix i.e. newC exists in R^{x_U.shape[0] X .out_features X .out_features}
+                    newC = torch.eye(modules[i-1].out_features).unsqueeze(0).repeat(x_U.shape[0], 1, 1) # JC take I matrix and make it R^{1 X out_features X out_features}, then add depth to it so there are shape[0] copies of the identity matrix i.e. newC exists in R^{x_U.shape[0] X .out_features X .out_features}
                     # JC verified in terminal but unsqueeze(0) above has no effect, simply make copies in the depth dimension
                     # JC this newC has a depth equivalent to the batch size which is simply x_U.shape[0], thus lower and upper bounds are computed simultaneuosly for every batch instance
                     # newC will always start as an identity matrix and will be transformed into upper and lower bounds during backward propogation
                     # Use CROWN to compute pre-activation bounds
                     # starting from layer i-1
-                    ub, lb = self.backward_range(x_U=x_U, x_L=x_L, C=newC, upper=True, lower=True, start_node=i-1, optimize=optimize)
+                    lambda_ = lagrange_multipliers[i - 1] if use_input_constraints else None # lagrange multipliers for this layer 
+                    ub, lb = self.backward_range(x_U=x_U, x_L=x_L, C=newC, upper=True, lower=True, start_node=i-1, optimize=optimize, lambda_=lambda_, G=G, h=h)
                 # Set pre-activation bounds for layer i (the ReLU layer) 
                 # JC the bounds of the ReLu layer will be the bounds of the output before the activation (ReLu) function
                 modules[i].upper_u = ub
                 modules[i].lower_l = lb
         # Get the final layer bound
-        
-        # JC only use the Lagrange multipliers in the last step but this may be subject to change
-        if use_input_constraints:
-            return self.backward_range(x_U=x_U, x_L=x_L, C=torch.eye(modules[i].out_features).unsqueeze(0), upper=upper, lower=lower, start_node=i, optimize=optimize, lambda_=lambda_, G=G, h=h, use_input_constraints=use_input_constraints)
-        else:
-            return self.backward_range(x_U=x_U, x_L=x_L, C=torch.eye(modules[i].out_features).unsqueeze(0), upper=upper, lower=lower, start_node=i, optimize=optimize)
+        lambda_ = lagrange_multipliers[i] if use_input_constraints else None # lagrange multipliers for this layer 
+        return self.backward_range(x_U=x_U, x_L=x_L, C=torch.eye(modules[i].out_features).unsqueeze(0), upper=upper, lower=lower, start_node=i, optimize=optimize, lambda_=lambda_, G=G, h=h)
 
-    def backward_range(self, x_U=None, x_L=None, C=None, upper=False, lower=True, start_node=None, optimize=False, lambda_=None, G=None, h=None, use_input_constraints=False):
+
+    def backward_range(self, x_U=None, x_L=None, C=None, upper=False, lower=True, start_node=None, optimize=False, lambda_=None, G=None, h=None):
         r"""The backward propagation starting from a given node. Can be used to compute intermediate bounds or the final bound.
 
         Args:
@@ -345,10 +363,8 @@ class BoundSequential(nn.Sequential):
             ub (tensor): The upper bound of the output of start_node.
             lb (tensor): The lower bound of the output of start_node.
         """
-        if use_input_constraints:
-            # JC ensure that the input constraints are available
-            assert self.has_input_constraints, "Cannot use input constraints as they were never given"
-            assert lambda_ is not None or G is not None or h is not None, "Input constraints but required values (lambda_, G, h) were not given"
+        # JC use the input constraints if they are given
+        use_input_constraints = True if (lambda_ is not None and G is not None and h is not None) else False
 
         # start propagation from the last layer
         modules = list(self._modules.values()) if start_node is None else list(self._modules.values())[:start_node+1] # JC want all of the modules from the first layer to this current layer [0,start_node]
@@ -377,8 +393,7 @@ class BoundSequential(nn.Sequential):
             # JC looking back at appendix D, center represents x^nom, and the second term represents (+/-)epsilon*||lower_A_{i,:}||_1 where the sign depends on what bound is being computed (neg. if lower bound)
 
             if use_input_constraints:
-                extrema = torch.abs(x_lb) if sign == -1 else torch.abs(x_ub)
-                bound = sign * torch.abs((A.squeeze(0).T - G.T@lambda_).T)@extrema - sign * h.T@lambda_
+                bound = sign * torch.abs((A.squeeze(0).T - G.T@lambda_).T@diff) + (A.squeeze(0).T - G.T@lambda_).T@center - sign * lambda_.T@h
                 bound = bound.squeeze(-1) + sum_b
 
             else:
@@ -394,7 +409,7 @@ class BoundSequential(nn.Sequential):
             lb = x_L.new([-np.inf])
         return ub, lb
     
-    def _get_optimized_bounds(self, x_U=None, x_L=None, upper=False, lower=True, use_input_constraints=False):
+    def _get_optimized_bounds(self, x_U=None, x_L=None, upper=False, lower=True, input_constraints=[]):
         r"""The main function of alpha-CROWN.
 
         Args:
@@ -412,31 +427,28 @@ class BoundSequential(nn.Sequential):
 
         JC Notice that lower is true and upper is false. This is because upper alpha is typically optimal, thus the main optimization to be done is on the alpha slope for the lower bound of ReLU
         """
-        # iteration = 1000 if use_input_constraints else 20# JC previously 20 but increasing number of iterations since we are not optimizing over more parameters
         iteration = 200
         modules = list(self._modules.values())
         self.init_alpha(x_U=x_U, x_L=x_L)
         alphas, parameters = [], []
         # JC obtains the parameters (includings alphas) to pass to Adam, references to the alphas, and a copy of the previous best alphas
         best_alphas = self._set_alpha(parameters, alphas, lr=1e-1)
-        if use_input_constraints:
+        if len(input_constraints) > 0:
             # JC must extend the parameters to include lambdas if there are input constraints
-            assert self.has_input_constraints, "No input constraints were given"
-            assert self.G is not None, "G not given"
-            assert self.h is not None, "h not given"
-            lambda_rows = self.G.shape[0]
-            lambda_ = torch.rand(lambda_rows, 1, requires_grad=True)
-            # if lower is True:
-            #     lambda_ = torch.tensor([[0.015097863377796374, 0.0, 0.0, 0.0, 0.01381309245806234]]).T
-            # else:
-            #     lambda_ = torch.tensor([[0.0, 0.0016282808635717343, 0.0, 0.0, 0.0]]).T
-            parameters[0]['params'].extend([lambda_])
-            loss_graph = np.array([i for i in range(iteration)], dtype=np.float32)
-            loss_graph = np.vstack((loss_graph, np.zeros(iteration)))
-            lambda_vals = np.array([i for i in range(iteration)], dtype=np.float32)
-            lambda_vals = np.tile(lambda_vals, lambda_.shape[0] + 1).reshape(-1, iteration) 
+            G = input_constraints[0]
+            h = input_constraints[1]
+            lagrange_multipliers = self._initialize_with_inputs_constraints(G, h)
+            # JC get the values as a list for Adam to optimize
+            lagrange_mult_parameters = list(lagrange_multipliers.values())
+            parameters[0]['params'].extend(lagrange_mult_parameters)
+            # loss_graph = np.array([i for i in range(iteration)], dtype=np.float32)
+            # loss_graph = np.vstack((loss_graph, np.zeros(iteration)))
+            # lambda_vals = np.array([i for i in range(iteration)], dtype=np.float32)
+            # lambda_vals = np.tile(lambda_vals, lambda_.shape[0] + 1).reshape(-1, iteration) 
         else:
-            lambda_ = None
+            G = None
+            h = None
+            lagrange_multipliers = None
         # print(f"Using parameters: {parameters}")
         opt = optim.Adam(parameters, maximize=True if lower else False)
         # Create a weight vector to scale learning rate.
@@ -449,7 +461,7 @@ class BoundSequential(nn.Sequential):
                 # No grad update needed for the last iteration
                 need_grad = False
             with torch.no_grad() if not need_grad else ExitStack():
-                ub, lb = self.full_backward_range(x_U=x_U, x_L=x_L, upper=upper, lower=lower, optimize=True, lambda_=lambda_, G=self.G, h=self.h, use_input_constraints=use_input_constraints)
+                ub, lb = self.full_backward_range(x_U=x_U, x_L=x_L, upper=upper, lower=lower, optimize=True, lagrange_multipliers=lagrange_multipliers, G=G, h=h)
             if i == 0:
                 # save results at the first iteration
                 best_ret = []
@@ -499,11 +511,13 @@ class BoundSequential(nn.Sequential):
                         node.clip_alpha()
 
             # JC also clip lambda
-            if use_input_constraints:
-                with torch.no_grad():
-                    lambda_.data = torch.clip(lambda_.data, min=0.0)
-                    lambda_vals[1:, i] = lambda_.data[:,0].detach().clone().numpy().flatten()
-                    loss_graph[1, i] = loss.item()
+            # if use_input_constraints:
+            #     with torch.no_grad():
+            #         lambda_.data = torch.clip(lambda_.data, min=0.0)
+                    # lambda_vals[1:, i] = lambda_.data[:,0].detach().clone().numpy().flatten()
+                    # loss_graph[1, i] = loss.item()
+            if lagrange_multipliers is not None:
+                self._clip_lagrange_multipliers(lagrange_multipliers)
 
             # print the lambda values for debugging
             scheduler.step()
@@ -522,34 +536,70 @@ class BoundSequential(nn.Sequential):
                     node.lower_l.data = best_intermediate[0].data
                     node.upper_u.data = best_intermediate[1].data
         
-        if (use_input_constraints):
-            fig = plt.figure(figsize=(18,12))
-            num_subs = 1 + lambda_.shape[0]
-            num_rows = ceil(num_subs / 2)
-            for i in range(num_subs):
-                plt.subplot(num_rows, 2, i + 1)
+        # if (use_input_constraints):
+        #     fig = plt.figure(figsize=(18,12))
+        #     num_subs = 1 + lambda_.shape[0]
+        #     num_rows = ceil(num_subs / 2)
+        #     for i in range(num_subs):
+        #         plt.subplot(num_rows, 2, i + 1)
                 
-                if i == 0:
-                    plt.title(f"Loss Function for {'Lower Bound' if upper is False else 'Upper Bound'} w/ Final {loss_graph[1,-1]}")
-                    plt.ylabel(f"y")
-                    plt.plot(loss_graph[0,:], loss_graph[1,:])
-                else:
-                    plt.title(f"Lambda {i} w.r.t. steps")
-                    plt.ylabel(f"Lambda {i}")
-                    plt.plot(lambda_vals[0,:], lambda_vals[i,:])
+        #         if i == 0:
+        #             plt.title(f"Loss Function for {'Lower Bound' if upper is False else 'Upper Bound'} w/ Final {loss_graph[1,-1]}")
+        #             plt.ylabel(f"y")
+        #             plt.plot(loss_graph[0,:], loss_graph[1,:])
+        #         else:
+        #             plt.title(f"Lambda {i} w.r.t. steps")
+        #             plt.ylabel(f"Lambda {i}")
+        #             plt.plot(lambda_vals[0,:], lambda_vals[i,:])
 
-                plt.xlabel("Steps")
+        #         plt.xlabel("Steps")
 
-            plt.show()
-            print(f"Lambda values: {lambda_.data}")
+        #     plt.show()
+        #     print(f"Lambda values: {lambda_.data}")
+        # save the final set of multipliers to a file
+        if lagrange_multipliers is not None:
+            filename = "lower" if lower else "upper"
+            filename = "abCROWN_multipliers_" + filename + ".txt"
+            lagrange_multipliers_numpy = {}
+            for key, val in lagrange_multipliers.items():
+                lagrange_multipliers_numpy[key] = val.detach().numpy().tolist()
+
+            with open(filename, 'w') as file:
+                json.dump(lagrange_multipliers_numpy, file, indent=2)
 
         return best_ret_u, best_ret_l
-    
-    def add_input_constraints(self, G, h):
-        print(f"Adding input constraints with G.shape {G.shape} and h.shape{h.shape}")
+
+    def _initialize_with_inputs_constraints(self, G,h):
         self.G = G
         self.h = h
-        self.has_input_constraints = True
+        num_constraints = G.shape[0]
+
+        # Every module that is a linear layer will produce and upper and lower bound output which 
+        # can be tightened with Lagrange multipliers, thus a collection of Lagrange multipliers must
+        # be created for every one of these layers.
+        # Per module, the shape of the multipliers will be R^{mxn} where m is the number of constraints
+        # and n is the dimension of the output of the current module
+        lagrange_multipliers = OrderedDict()
+        modules = list(self._modules.values())
+        for i, node in enumerate(modules):
+            if isinstance(modules[i], BoundReLU):
+                if isinstance(modules[i-1], BoundLinear):
+                    curr_layer_lagrange = torch.rand(num_constraints, modules[i-1].out_features, requires_grad=True)
+                    lagrange_multipliers[i - 1] = curr_layer_lagrange
+
+        # create lagrange multipliers for the final layer of the Neural Net
+        curr_layer_lagrange = torch.rand(num_constraints, modules[i].out_features, requires_grad=True)
+        lagrange_multipliers[i] = curr_layer_lagrange
+
+        return lagrange_multipliers
+    
+    def _clip_lagrange_multipliers(self, lagrange_multipliers):
+
+        # clamp all of the Lagrange multipliers so that they are positive
+        with torch.no_grad():
+            for layer_multipliers in lagrange_multipliers.values():
+                layer_multipliers.data = torch.clamp(layer_multipliers.data, min=0.0)
+
 
     def init_alpha(self, x_U=None, x_L=None):
         r"""Initialize alphas and intermediate bounds for alpha-CROWN
@@ -676,7 +726,8 @@ def _save_ret_first_time(bounds, fill_value, best_ret):
 
 if __name__ == '__main__':
     model = Model()
-    model.load_state_dict(torch.load('very_stupid_model.pth'))
+    # model.load_state_dict(torch.load('very_simple_model.pth'))
+    model.load_state_dict(torch.load('large_model.pth'))
 
     input_width = model.model[0].in_features
     output_width = model.model[-1].out_features
@@ -719,9 +770,11 @@ if __name__ == '__main__':
     # h = torch.tensor([[-25/3], [-19/4]])
     G = torch.tensor([[2/9, -1], [6/5, -1], [5/3, 1], [-1/8, 1], [-5, -1]])
     h = torch.tensor([[-46/9], [-6], [-25/3], [-19/4], [-26]])
+    G = torch.tensor([[1/3, -1],[3, 1],[-1/3, 1], [-3, -1]])
+    h = torch.tensor([[-5/3],[-5],[-5/3],[-5]])
+    input_constraints = [G,h]
     boundedmodel = BoundSequential.convert(model.model)
-    boundedmodel.add_input_constraints(G,h) # JC add constraints on the input
-    ub, lb = boundedmodel.compute_bounds(x_U=x_u, x_L=x_l, upper=True, lower=True, optimize=True, use_input_constraints=True)
+    ub, lb = boundedmodel.compute_bounds(x_U=x_u, x_L=x_l, upper=True, lower=True, optimize=True, input_constraints=input_constraints)
     for i in range(batch_size):
         for j in range(output_width):
             print('f_{j}(x_{i}): {l:8.4f} <= f_{j}(x_{i}+delta) <= {u:8.4f}'.format(

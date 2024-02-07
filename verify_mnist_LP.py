@@ -13,7 +13,8 @@ from torch import optim
 import numpy as np
 # from model import Model
 # from simple_model import Model
-from stupid_model import Model
+# from stupid_model import Model
+from large_model import Model
 from gurobipy import GRB, quicksum, max_
 from tqdm import trange
 from copy import deepcopy
@@ -105,12 +106,14 @@ class MNISTModelVerifier:
         # x0 = m.getVarByName('x[0]')
         # x1 = m.getVarByName('x[1]')
         # x_in = [x0, x1]
-        # ineq_constraints = []
-        # if with_input_constraints:
-        #     G = np.array([[-2/9, 1],[-6/5, 1], [-5/3, -1], [1/8, -1], [5, 1]])
-        #     h = np.array([[46/9], [6], [25/3], [19/4], [26]])
-        #     for i in range(G.shape[0]):
-        #         ineq_constraints.append(m.addConstr(quicksum(G[i,j] * activations[j] for j in range(G.shape[1])) <= h[i], name=f'input_constr_{i}'))
+        ineq_constraints = []
+        if with_input_constraints:
+            G = np.array([[2/9, -1], [6/5, -1], [5/3, 1], [-1/8, 1], [-5, -1]])
+            h = np.array([[-46/9], [-6], [-25/3], [-19/4], [-26]])
+            G = np.array([[1/3, -1],[3, 1],[-1/3, 1], [-3, -1]])
+            h = np.array([[-5/3],[-5],[-5/3],[-5]])
+            for i in range(G.shape[0]):
+                ineq_constraints.append(m.addConstr(quicksum(G[i,j] * og_activations[j] for j in range(G.shape[1])) >= h[i], name=f'input_constr_{i}'))
 
         # JC get the modules per layer
         for i, module in enumerate(self.net.model.children()):
@@ -190,12 +193,14 @@ class MNISTModelVerifier:
         # m.addConstr(max_incorrect_logit == max_([var for i, var in enumerate(output_neurons) if i != label]),
         #             name="max_incorrect_logit")
         # m.setObjective(output_neurons[label] - max_incorrect_logit, GRB.MINIMIZE)
-        ineq_constraints = []
-        if with_input_constraints:
-            G = np.array([[-2/9, 1],[-6/5, 1], [-5/3, -1], [1/8, -1], [5, 1]])
-            h = np.array([[46/9], [6], [25/3], [19/4], [26]])
-            for i in range(G.shape[0]):
-                ineq_constraints.append(m.addConstr(quicksum(G[i,j] * og_activations[j] for j in range(G.shape[1])) <= h[i], name=f'input_constr_{i}'))
+        # ineq_constraints = []
+        # if with_input_constraints:
+        #     G = np.array([[2/9, -1], [6/5, -1], [5/3, 1], [-1/8, 1], [-5, -1]])
+        #     h = np.array([[-46/9], [-6], [-25/3], [-19/4], [-26]])
+        #     G = np.array([[1/3, -1],[3, 1],[-1/3, 1], [-3, -1]])
+        #     h = np.array([[-5/3],[-5],[-5/3],[-5]])
+        #     for i in range(G.shape[0]):
+        #         ineq_constraints.append(m.addConstr(quicksum(G[i,j] * og_activations[j] for j in range(G.shape[1])) >= h[i], name=f'input_constr_{i}'))
         
         # JC this now find the bounds on each logit
         lb = torch.zeros((1, len(output_neurons)), dtype=torch.float32)
@@ -266,7 +271,8 @@ if __name__ == "__main__":
     # JC testing out MNIST verifier on a very simple model
     model = Model()
     # model.load_state_dict(torch.load('very_simple_model.pth'))
-    model.load_state_dict(torch.load("very_stupid_model.pth"))
+    # model.load_state_dict(torch.load("very_stupid_model.pth"))
+    model.load_state_dict(torch.load('large_model.pth'))
 
     print("Printing structure of 'very_stupid_model.pth'")
     for name, param in model.named_parameters():

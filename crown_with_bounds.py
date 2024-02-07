@@ -11,7 +11,8 @@ from contextlib import ExitStack
 # JC here you may import any model you wish to verify
 # from model import Model
 # from simple_model import Model
-from stupid_model import Model
+# from stupid_model import Model
+from large_model import Model
 import matplotlib.pyplot as plt
 from math import ceil
 
@@ -388,10 +389,9 @@ class BoundSequential(nn.Sequential):
             # JC looking back at appendix D, center represents x^nom, and the second term represents (+/-)epsilon*||lower_A_{i,:}||_1 where the sign depends on what bound is being computed (neg. if lower bound)
 
             if use_input_constraints:
-                extrema = torch.abs(x_lb) if sign == -1 else torch.abs(x_ub)
 
                 # attempt 5 (using the actual minima and maxima)
-                bound = sign * torch.abs((A.squeeze(0).T - G.T@lambda_).T)@extrema - sign * h.T@lambda_
+                bound = sign * torch.abs((A.squeeze(0).T - G.T@lambda_).T@diff) + (A.squeeze(0).T - G.T@lambda_).T@center - sign * lambda_.T@h
                 bound = bound.squeeze(-1) + sum_b
 
                 # attempt 4 (should look similar to attempt 2)
@@ -453,7 +453,7 @@ class BoundSequential(nn.Sequential):
             assert self.G is not None, "G not given"
             assert self.h is not None, "h not given"
             lambda_rows = self.G.shape[0]
-            lambda_ = torch.rand(lambda_rows, 1, requires_grad=True)
+            lambda_ = torch.rand(lambda_rows, G.shape[1], requires_grad=True)
             # if lower is True:
             #     lambda_ = torch.tensor([[0.015097863377796374, 0.0, 0.0, 0.0, 0.01381309245806234]]).T
             # else:
@@ -809,7 +809,9 @@ def _save_ret_first_time(bounds, fill_value, best_ret):
 
 if __name__ == '__main__':
     model = Model()
-    model.load_state_dict(torch.load('very_stupid_model.pth'))
+    # model.load_state_dict(torch.load('very_simple_model.pth'))
+    # model.load_state_dict(torch.load('very_stupid_model.pth'))
+    model.load_state_dict(torch.load('large_model.pth'))
 
     input_width = model.model[0].in_features
     output_width = model.model[-1].out_features
@@ -852,6 +854,8 @@ if __name__ == '__main__':
     # h = torch.tensor([[-25/3], [-19/4]])
     G = torch.tensor([[2/9, -1], [6/5, -1], [5/3, 1], [-1/8, 1], [-5, -1]])
     h = torch.tensor([[-46/9], [-6], [-25/3], [-19/4], [-26]])
+    G = torch.tensor([[1/3, -1],[3, 1],[-1/3, 1], [-3, -1]])
+    h = torch.tensor([[-5/3],[-5],[-5/3],[-5]])
     boundedmodel = BoundSequential.convert(model.model)
     boundedmodel.add_input_constraints(G,h) # JC add constraints on the input
     ub, lb = boundedmodel.compute_bounds(x_U=x_u, x_L=x_l, upper=True, lower=True, optimize=True, use_input_constraints=True)
