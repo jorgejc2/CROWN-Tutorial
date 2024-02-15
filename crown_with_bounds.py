@@ -11,8 +11,8 @@ from contextlib import ExitStack
 # JC here you may import any model you wish to verify
 # from model import Model
 # from simple_model import Model
-# from stupid_model import Model
-from large_model import Model
+from stupid_model import Model
+# from large_model import Model
 import matplotlib.pyplot as plt
 from math import ceil
 
@@ -384,14 +384,19 @@ class BoundSequential(nn.Sequential):
             x_ub = x_U.view(x_U.size(0), -1, 1)
             x_lb = x_L.view(x_L.size(0), -1, 1)
             center = (x_ub + x_lb) / 2.0
-            diff = (x_ub - x_lb) / 2.0
+            diff = torch.abs((x_ub - x_lb) / 2.0)
             # JC .bmm performs a batch matrix multiplication where each batch will be multiplied by the input given to .bmm(...)
             # JC looking back at appendix D, center represents x^nom, and the second term represents (+/-)epsilon*||lower_A_{i,:}||_1 where the sign depends on what bound is being computed (neg. if lower bound)
 
             if use_input_constraints:
 
+                if sign < 0:
+                    bound = -1 * (A.squeeze(0) - lambda_.T@G).abs()@diff + (A.squeeze(0) - lambda_.T@G)@center + lambda_.T@h
+                elif sign > 0:
+                    bound = 1 * (A.squeeze(0) + lambda_.T@G).abs()@diff + (A.squeeze(0) + lambda_.T@G)@center - lambda_.T@h
+
                 # attempt 5 (using the actual minima and maxima)
-                bound = sign * torch.abs((A.squeeze(0).T - G.T@lambda_).T@diff) + (A.squeeze(0).T - G.T@lambda_).T@center - sign * lambda_.T@h
+                # bound = sign * torch.abs((A.squeeze(0).T - G.T@lambda_).T@diff) + (A.squeeze(0).T - G.T@lambda_).T@center - sign * lambda_.T@h
                 bound = bound.squeeze(-1) + sum_b
 
                 # attempt 4 (should look similar to attempt 2)
@@ -459,14 +464,17 @@ class BoundSequential(nn.Sequential):
             # else:
             #     lambda_ = torch.tensor([[0.0, 0.0016282808635717343, 0.0, 0.0, 0.0]]).T
             parameters[0]['params'].extend([lambda_])
+            # parameters[0]['params'] = [lambda_]
             loss_graph = np.array([i for i in range(iteration)], dtype=np.float32)
             loss_graph = np.vstack((loss_graph, np.zeros(iteration)))
             lambda_vals = np.array([i for i in range(iteration)], dtype=np.float32)
             lambda_vals = np.tile(lambda_vals, lambda_.shape[0] + 1).reshape(-1, iteration) 
+            opt = optim.Adam(parameters, maximize=True if lower else False)
         else:
             lambda_ = None
+            opt = optim.Adam(parameters, maximize=True if lower else False)
         # print(f"Using parameters: {parameters}")
-        opt = optim.Adam(parameters, maximize=True if lower else False)
+        
         # Create a weight vector to scale learning rate.
         scheduler = optim.lr_scheduler.ExponentialLR(opt, 0.98)
         best_intermediate_bounds = {}
@@ -810,8 +818,8 @@ def _save_ret_first_time(bounds, fill_value, best_ret):
 if __name__ == '__main__':
     model = Model()
     # model.load_state_dict(torch.load('very_simple_model.pth'))
-    # model.load_state_dict(torch.load('very_stupid_model.pth'))
-    model.load_state_dict(torch.load('large_model.pth'))
+    model.load_state_dict(torch.load('very_stupid_model.pth'))
+    # model.load_state_dict(torch.load('large_model.pth'))
 
     input_width = model.model[0].in_features
     output_width = model.model[-1].out_features

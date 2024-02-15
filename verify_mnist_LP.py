@@ -13,8 +13,8 @@ from torch import optim
 import numpy as np
 # from model import Model
 # from simple_model import Model
-# from stupid_model import Model
-from large_model import Model
+from stupid_model import Model
+# from large_model import Model
 from gurobipy import GRB, quicksum, max_
 from tqdm import trange
 from copy import deepcopy
@@ -101,6 +101,10 @@ class MNISTModelVerifier:
         #     activations = m.addMVar(shape=(n_in), name='x', lb=np.array([-2.0, -5.0]), ub=np.array([4.0, 6.0]))
         pre_activation = None  # We assume the network doesn't start with a ReLU
 
+        upper_dual_variables = {}
+        lower_dual_variables = {}
+        dual_layer_count = 0
+
         # JC finally adding constraints to the input
         # print(m.getVarByName('x'))
         # x0 = m.getVarByName('x[0]')
@@ -124,6 +128,7 @@ class MNISTModelVerifier:
         # modules = self.net.net
 
         # Go through sequential net and tighten bounds using LP at each layer
+        last_constrs = None
         for index, module in enumerate(modules):
 
             # JC printing more information
@@ -141,7 +146,7 @@ class MNISTModelVerifier:
                 n_out, n_in = weight.shape
 
                 pre_activation = np.array(list(m.addVars(n_out, lb=float("-inf"), name=f"z{index}").values()))
-                m.addConstrs((
+                last_constrs = m.addConstrs((
                     pre_activation[i] == quicksum([weight[i][j] * activations[j] for j in range(n_in)]) + bias[i]
                     for i in range(n_out)),
                     f"{index}.Linear",
@@ -158,11 +163,29 @@ class MNISTModelVerifier:
                 for idx, neuron in enumerate(pre_activation):
                     m.setObjective(neuron, sense=GRB.MINIMIZE)
                     m.optimize()
+                    # relaxed = m.relax()
+                    # relaxed.optimize()
                     lb[idx] = m.ObjVal
+                    # lb[idx] = relaxed.ObjVal
+
+                    # now add the lower bound dual variables to the dictionary for comparison
+                    # curr_lb_duals = [const.pi for const in last_constrs]
+                    # lower_dual_variables[dual_layer_count] = curr_lb_duals
+
                     m.setObjective(neuron, sense=GRB.MAXIMIZE)
                     m.optimize()
+                    # relaxed = m.relax()
+                    # relaxed.optimize()
                     ub[idx] = m.ObjVal
+                    # ub[idx] = relaxed.ObjVal
 
+                    # now add the upper bound dual variables to the dictionary for comparison
+                    # curr_ub_duals = [const.pi[0] for const in last_constrs]
+                    # upper_dual_variables[dual_layer_count] = curr_ub_duals
+
+                    dual_layer_count += 1
+
+                # JC by default, addVars sets the lower bound to be 0.0
                 activations = np.array(list(m.addVars(n_in, name=f"a{index}").values()))
 
                 for i in range(n_in):
@@ -210,11 +233,16 @@ class MNISTModelVerifier:
         for i in range(len(output_neurons)):
             m.setObjective(output_neurons[i], GRB.MINIMIZE)
             m.optimize()
+            # relaxed = m.relax()
+            # relaxed.optimize()
             # append dual variables for the lower bound
-            ineq_pi.append([const.pi[0] for const in ineq_constraints])
-            ineq_pi[-1].extend([f"lb: {i}",])
+
+            # ineq_pi.append([const.pi[0] for const in ineq_constraints])
+            # ineq_pi[-1].extend([f"lb: {i}",])
             min_val = m.ObjVal
+            # min_val = relaxed.ObjVal
             lb[0,i] = min_val
+            print(f"lb[0,{i}] = {min_val}")
             min_vars = ""
             for v in m.getVars():
                 min_vars += '%s: %g\n' % (v.VarName, v.x)
@@ -222,27 +250,26 @@ class MNISTModelVerifier:
 
             m.setObjective(output_neurons[i], GRB.MAXIMIZE)
             m.optimize()
+            # relaxed = m.relax()
+            # relaxed.optimize()
             # append dual variables for the upper bound
-            ineq_pi.append([const.pi[0] for const in ineq_constraints])
-            ineq_pi[-1].extend([f"ub: {i}",])
+            # ineq_pi.append([const.pi[0] for const in ineq_constraints])
+            # ineq_pi[-1].extend([f"ub: {i}",])
+            # max_val = m.ObjVal
             max_val = m.ObjVal
             ub[0,i] = max_val
+            print(f"ub[0,{i}] = {max_val}")
             max_vars = ""
             for v in m.getVars():
                 max_vars += '%s: %g\n' % (v.VarName, v.x)
 
             print(f"i: {i} | {min_val} <= f(x) <= {max_val}")      
-            print("Min Vars")
-            print(min_vars)
-            print("Max Vars")
-            print(max_vars)
-        m.setObjective(quicksum(o for o in output_neurons), GRB.MINIMIZE)
-        m.optimize()
-        ineq_pi.append([const.pi[0] for const in ineq_constraints])
-        m.setObjective(quicksum(o for o in output_neurons), GRB.MAXIMIZE)
-        m.optimize()
-        ineq_pi.append([const.pi[0] for const in ineq_constraints])
-        print(f"Sum objective value: {m.ObjVal}")
+            # print("Min Vars")
+            # print(min_vars)
+            # print("Max Vars")
+            # print(max_vars)
+
+        print(f"Final Output: \nUpper duals\n {upper_dual_variables}\nLower duals\n {lower_dual_variables}")
 
         # if save_solution_filename:
         #     try:
@@ -271,8 +298,8 @@ if __name__ == "__main__":
     # JC testing out MNIST verifier on a very simple model
     model = Model()
     # model.load_state_dict(torch.load('very_simple_model.pth'))
-    # model.load_state_dict(torch.load("very_stupid_model.pth"))
-    model.load_state_dict(torch.load('large_model.pth'))
+    model.load_state_dict(torch.load("very_stupid_model.pth"))
+    # model.load_state_dict(torch.load('large_model.pth'))
 
     print("Printing structure of 'very_stupid_model.pth'")
     for name, param in model.named_parameters():
