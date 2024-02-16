@@ -11,10 +11,11 @@ from contextlib import ExitStack
 # additional packages
 import json
 # from simple_model import Model
-from stupid_model import Model
-# from large_model import Model
+# from stupid_model import Model
+from large_model import Model
 import matplotlib.pyplot as plt
 from math import ceil
+from copy import deepcopy
 
 class BoundLinear(nn.Linear):
     def __init(self, in_features, out_features, bias=True):
@@ -394,7 +395,7 @@ class BoundSequential(nn.Sequential):
                 if sign < 0:
                     bound = -1 * (A.squeeze(0) - lambda_.T@G).abs()@diff + (A.squeeze(0) - lambda_.T@G)@center + lambda_.T@h
                 elif sign > 0:
-                    bound = 1 * (A.squeeze(0) + lambda_.T@G).abs()@diff + (A.squeeze(0) + lambda_.T@G)@center - lambda_.T@h
+                    bound = 1 * (-A.squeeze(0) + lambda_.T@G).abs()@diff + (-A.squeeze(0) + lambda_.T@G)@center - lambda_.T@h
 
                 bound = bound.squeeze(-1) + sum_b
 
@@ -429,7 +430,8 @@ class BoundSequential(nn.Sequential):
 
         JC Notice that lower is true and upper is false. This is because upper alpha is typically optimal, thus the main optimization to be done is on the alpha slope for the lower bound of ReLU
         """
-        iteration = 80
+        iteration = 800
+        loss_rate = np.zeros(iteration, dtype=np.float32)
         modules = list(self._modules.values())
         self.init_alpha(x_U=x_U, x_L=x_L)
         alphas, parameters = [], []
@@ -442,7 +444,11 @@ class BoundSequential(nn.Sequential):
             lagrange_multipliers = self._initialize_with_inputs_constraints(G, h)
             # JC get the values as a list for Adam to optimize
             lagrange_mult_parameters = list(lagrange_multipliers.values())
-            parameters[0]['params'].extend(lagrange_mult_parameters)
+            la_parameters = deepcopy(parameters)
+            la_parameters[0]['params'].extend(lagrange_mult_parameters)
+            lagrange_opt = optim.Adam(la_parameters, maximize=True if lower else False)
+            # lagrange_scheduler = optim.lr_scheduler.ExponentialLR(lagrange_opt, 0.96)
+            lagrange_scheduler = optim.lr_scheduler.ReduceLROnPlateau(lagrange_opt, 'max' if lower else "min")
         else:
             G = None
             h = None
@@ -450,7 +456,8 @@ class BoundSequential(nn.Sequential):
         # print(f"Using parameters: {parameters}")
         alpha_opt = optim.Adam(parameters, maximize=True if lower else False)
         # Create a weight vector to scale learning rate.
-        alpha_scheduler = optim.lr_scheduler.ExponentialLR(alpha_opt, 0.98)
+        # alpha_scheduler = optim.lr_scheduler.ExponentialLR(alpha_opt, 0.98)
+        alpha_scheduler = optim.lr_scheduler.ReduceLROnPlateau(alpha_opt, 'max' if lower else "min")
         best_intermediate_bounds = {}
         final_intermediate_bounds = {}
         need_grad = True
@@ -486,26 +493,32 @@ class BoundSequential(nn.Sequential):
 
             loss_ = l if lower else u
             loss = loss_.sum() # JC negative one because we want to maximize a lower bound but minimze an upper bound
+            loss_rate[i] = loss.detach().clone().numpy().flatten().sum()
             with torch.no_grad():    
                 best_ret_l = torch.max(best_ret_l, lb)
                 best_ret_u = torch.min(best_ret_u, ub)
                 self._update_optimizable_activations(best_intermediate_bounds, best_alphas)
 
             alpha_opt.zero_grad(set_to_none=True) # JC reset the gradients before we accumulate them using loss.backward()
+            if lagrange_multipliers is not None: lagrange_opt.zero_grad(set_to_none=True)
             if i != iteration - 1:
                 # We do not need to update parameters in the last step since the
                 # best result already obtained
                 loss.backward()
                 alpha_opt.step()
+                if lagrange_multipliers is not None: lagrange_opt.step()
             for _, node in enumerate(modules):
                 if isinstance(node, BoundReLU):
                     with torch.no_grad():
                         node.clip_alpha()
 
-            alpha_scheduler.step()
+            alpha_scheduler.step(loss)
+            # alpha_scheduler.step()
 
             if lagrange_multipliers is not None:
                 self._clip_lagrange_multipliers(lagrange_multipliers)
+                lagrange_scheduler.step(loss)
+                # lagrange_scheduler.step()
 
             # print the lambda values for debugging
             # scheduler.step()
@@ -518,7 +531,7 @@ class BoundSequential(nn.Sequential):
             for idx, node in enumerate(modules):
                 if isinstance(node, BoundReLU):
                     # Assigns a new dictionary
-                    node.alpha = best_alphas[idx]
+                    # node.alpha = best_alphas[idx]
                     best_intermediate = best_intermediate_bounds[idx]
                     node.lower_l.data = best_intermediate[0].data
                     node.upper_u.data = best_intermediate[1].data
@@ -533,6 +546,21 @@ class BoundSequential(nn.Sequential):
 
             with open(filename, 'w') as file:
                 json.dump(lagrange_multipliers_numpy, file, indent=2)
+
+        if lagrange_multipliers is not None:
+            if lower:
+                title = "Lower with Lagrange"
+            else:
+                title = "Upper with Lagrange"
+        else:
+            if lower:
+                title = "Lower with Alpha"
+            else:
+                title = "Upper with Alpha"
+        fig = plt.figure()
+        plt.title(title)
+        plt.plot([i for i in range(iteration)], loss_rate)
+        plt.show()
 
         return best_ret_u, best_ret_l
 
@@ -652,6 +680,8 @@ class BoundSequential(nn.Sequential):
         for i, node in enumerate(modules):
             if isinstance(node, BoundReLU):
                 # JC save the higher (tighter) lower bound as the best
+                lower_alpha_indices = torch.argwhere(best_intermediate_bounds[i][0] > node.lower_l)
+                upper_alpha_indices = torch.argwhere(best_intermediate_bounds[i][1] > node.upper_u)
                 best_intermediate_bounds[i][0] = torch.max(
                     best_intermediate_bounds[i][0],
                     node.lower_l
@@ -661,6 +691,9 @@ class BoundSequential(nn.Sequential):
                     best_intermediate_bounds[i][1],
                     node.upper_u
                 )
+                # print(f"Shape of best_alphas[i] {best_alphas[i].shape}\nshape node.alpha.values() {list(node.alpha.values()).shape}")
+                # best_alphas[i][0,lower_alpha_indices] = node.alpha[0,lower_alpha_indices].detach().clone()
+                # best_alphas[i][1,upper_alpha_indices] = node.alpha[1,upper_alpha_indices].detach().clone()
 
                 for alpha_m in node.alpha:
                     best_alphas[i][alpha_m] = node.alpha[alpha_m].detach().clone()
@@ -684,8 +717,8 @@ def _save_ret_first_time(bounds, fill_value, best_ret):
 if __name__ == '__main__':
     model = Model()
     # model.load_state_dict(torch.load('very_simple_model.pth'))
-    model.load_state_dict(torch.load('very_stupid_model.pth'))
-    # model.load_state_dict(torch.load('large_model.pth'))
+    # model.load_state_dict(torch.load('very_stupid_model.pth'))
+    model.load_state_dict(torch.load('large_model.pth'))
 
     input_width = model.model[0].in_features
     output_width = model.model[-1].out_features

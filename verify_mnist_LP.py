@@ -13,8 +13,8 @@ from torch import optim
 import numpy as np
 # from model import Model
 # from simple_model import Model
-from stupid_model import Model
-# from large_model import Model
+# from stupid_model import Model
+from large_model import Model
 from gurobipy import GRB, quicksum, max_
 from tqdm import trange
 from copy import deepcopy
@@ -298,8 +298,8 @@ if __name__ == "__main__":
     # JC testing out MNIST verifier on a very simple model
     model = Model()
     # model.load_state_dict(torch.load('very_simple_model.pth'))
-    model.load_state_dict(torch.load("very_stupid_model.pth"))
-    # model.load_state_dict(torch.load('large_model.pth'))
+    # model.load_state_dict(torch.load("very_stupid_model.pth"))
+    model.load_state_dict(torch.load('large_model.pth'))
 
     print("Printing structure of 'very_stupid_model.pth'")
     for name, param in model.named_parameters():

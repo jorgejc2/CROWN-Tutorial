@@ -476,7 +476,7 @@ class BoundSequential(nn.Sequential):
         # print(f"Using parameters: {parameters}")
         
         # Create a weight vector to scale learning rate.
-        scheduler = optim.lr_scheduler.ExponentialLR(opt, 0.98)
+        scheduler = optim.lr_scheduler.ExponentialLR(opt, 0.90)
         best_intermediate_bounds = {}
         final_intermediate_bounds = {}
         need_grad = True
